@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Auto-reaction bot untuk satu channel Telegram.
 
-Lima bot memasang satu reaction pada setiap post baru. Hanya bot pertama yang
-menerima update lewat getUpdates; kelima token dipakai untuk memanggil
-setMessageReaction.
+Lima bot memasang satu reaction pada setiap post rich article baru. Hanya bot
+pertama yang menerima update lewat getUpdates; kelima token dipakai untuk
+memanggil setMessageReaction.
 """
 
 from __future__ import annotations
@@ -212,10 +212,25 @@ def matches_channel(channel_id: str | None, chat: dict[str, Any]) -> bool:
     return str(chat.get("id", "")) == target
 
 
+def is_article_post(post: dict[str, Any]) -> bool:
+    """True hanya untuk rich message, bukan stiker atau post biasa."""
+    if post.get("sticker") is not None:
+        return False
+    rich_message = post.get("rich_message")
+    return isinstance(rich_message, dict) and bool(rich_message)
+
+
 def check_channel(cfg: Config) -> None:
     if not cfg.channel_id:
         log.info("CHANNEL_ID kosong; cek admin channel dilewati")
         return
+
+    target = cfg.channel_id.strip()
+    if target.lstrip("-").isdigit() and not target.startswith("-100"):
+        raise SystemExit(
+            "CHANNEL_ID numerik harus diawali -100, contoh -1003955448047. "
+            "Jangan pakai angka tanpa prefix -100."
+        )
 
     chat = api_call(cfg.bots[0].token, "getChat", {"chat_id": cfg.channel_id})
     log.info("channel: %s (id=%s)", chat.get("title"), chat.get("id"))
@@ -344,6 +359,13 @@ def handle_post(
     chat = post.get("chat") or {}
     chat_id = chat.get("id")
     if chat_id is None or not matches_channel(cfg.channel_id, chat):
+        return
+
+    if not is_article_post(post):
+        log.debug(
+            "skip post %s: bukan rich article",
+            post.get("message_id"),
+        )
         return
 
     media_group_id = post.get("media_group_id")

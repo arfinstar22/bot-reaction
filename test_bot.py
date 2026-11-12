@@ -1,9 +1,22 @@
 import http.client
 import os
 import unittest
+from collections import deque
+from pathlib import Path
 from unittest.mock import patch
 
-from bot import filter_pool, normalize_emoji, pick_reactions, start_health_server
+from bot import (
+    Bot,
+    ChatContext,
+    Config,
+    check_channel,
+    filter_pool,
+    handle_post,
+    is_article_post,
+    normalize_emoji,
+    pick_reactions,
+    start_health_server,
+)
 
 
 class ReactionBotTest(unittest.TestCase):
@@ -48,6 +61,65 @@ class ReactionBotTest(unittest.TestCase):
         finally:
             server.shutdown()
             server.server_close()
+
+    def test_only_rich_article_gets_reaction(self):
+        self.assertTrue(
+            is_article_post(
+                {"rich_message": {"blocks": [{"type": "paragraph"}]}}
+            )
+        )
+        self.assertFalse(is_article_post({"rich_message": {}}))
+        self.assertFalse(is_article_post({"text": "post biasa"}))
+        self.assertFalse(is_article_post({"sticker": {"file_id": "abc"}}))
+        self.assertFalse(
+            is_article_post(
+                {
+                    "sticker": {"file_id": "abc"},
+                    "rich_message": {"blocks": [{"type": "paragraph"}]},
+                }
+            )
+        )
+
+    def _config(self):
+        return Config(
+            bots=[Bot(token=f"token{i}") for i in range(5)],
+            channel_id="-1001",
+            reactions_file=Path("reactions.txt"),
+        )
+
+    def test_numeric_channel_id_requires_minus_100_prefix(self):
+        cfg = self._config()
+        cfg.channel_id = "3955448047"
+        with self.assertRaises(SystemExit):
+            check_channel(cfg)
+
+    def test_sticker_skipped_before_api_call(self):
+        post = {
+            "chat": {"id": -1001},
+            "message_id": 7,
+            "sticker": {"file_id": "abc"},
+        }
+        with patch("bot.get_chat_context") as context, patch("bot.api_call") as api:
+            handle_post(post, self._config(), ["❤"], {}, set(), deque())
+        context.assert_not_called()
+        api.assert_not_called()
+
+    def test_rich_article_sends_five_reactions(self):
+        post = {
+            "chat": {"id": -1001},
+            "message_id": 8,
+            "rich_message": {"blocks": [{"type": "paragraph"}]},
+        }
+        context = ChatContext(emojis=["❤", "🔥", "👍", "🎉", "😁"], limit=5)
+        with patch("bot.get_chat_context", return_value=context), patch(
+            "bot.api_call"
+        ) as api:
+            handle_post(post, self._config(), ["❤"], {}, set(), deque())
+        self.assertEqual(api.call_count, 5)
+        chosen = [
+            call.args[2]["reaction"][0]["emoji"] for call in api.call_args_list
+        ]
+        self.assertEqual(sorted(chosen), sorted(context.emojis))
 
 
 if __name__ == "__main__":

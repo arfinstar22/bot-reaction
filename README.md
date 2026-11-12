@@ -13,6 +13,7 @@ Emoji diambil dari `reactions.txt`. Bot memilih dari emoji yang memang diizinkan
 - Bot 2 sampai Bot 5 tidak perlu polling atau webhook.
 - Kelima bot tetap harus admin channel. Bot tidak bisa menjadi subscriber biasa di channel.
 - Emoji difilter dengan `available_reactions` channel. Kalau channel hanya mengizinkan sebagian emoji, hanya bagian itu yang dipakai.
+- Bot hanya bereaksi pada post **rich article** dari projectTumbnail, yaitu post yang punya field `rich_message`. Stiker, teks biasa, foto, video, album, dan service message dilewati.
 - Post yang sudah ada sebelum bot start dilewati. Bot hanya bereaksi ke post baru selama bot berjalan. Post saat bot mati tidak diproses ulang.
 - Di Render, bot membuka port HTTP kecil untuk health check dan keepalive. Di Fly.io atau VPS, port tidak dibuka kalau `PORT` kosong.
 
@@ -38,7 +39,9 @@ CHANNEL_ID=@nama_channel
 ```
 
 - Channel publik: isi `@username`.
-- Channel privat: kosongkan dulu `CHANNEL_ID`, jalankan bot, posting satu kali, lalu lihat `id=-100...` di log. Setelah itu isi `CHANNEL_ID` dan restart.
+- Channel privat: isi ID lengkap dengan prefix `-100`, contoh `CHANNEL_ID=-1001234567890`.
+- Kalau belum tahu ID: kosongkan `CHANNEL_ID`, posting satu kali, lihat `id=-100...` di log, lalu isi dan restart.
+- Angka polos seperti `3955448047` bukan ID channel. Telegram memakai `-1003955448047`.
 - Kalau `CHANNEL_ID` kosong, bot memproses channel apa pun yang mengirim `channel_post`. Isi `CHANNEL_ID` kalau bot dipasang di lebih dari satu channel.
 
 ### 3. Tambahkan kelima bot sebagai admin
@@ -277,6 +280,9 @@ Ada proses lain yang polling bot controller, atau webhook masih aktif. Hentikan 
 
 **`401 Unauthorized`**
 Token salah atau sudah di-revoke. Buat token baru lewat BotFather.
+
+**`400 Bad Request: chat not found`**
+`CHANNEL_ID` salah. Channel numerik wajib memakai prefix `-100`, contoh `-1003955448047`, bukan `3955448047`. Pastikan juga kelima bot sudah admin channel.
 
 **`CHAT_ADMIN_REQUIRED` atau `not enough rights`**
 Bot belum admin channel. Tambahkan lewat `Channel > Administrators`.
