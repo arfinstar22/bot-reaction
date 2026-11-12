@@ -4,6 +4,8 @@ Lima bot memasang **5 reaction acak yang berbeda** pada setiap post baru di satu
 
 Emoji diambil dari `reactions.txt`. Bot memilih dari emoji yang memang diizinkan di channel, jadi reaction tidak ditolak karena setting channel.
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/arfinstar22/bot-reaction)
+
 ## Cara kerja
 
 - Bot 1 menjadi **controller**: polling `getUpdates` dengan `allowed_updates=["channel_post"]`.
