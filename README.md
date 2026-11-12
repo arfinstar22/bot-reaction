@@ -77,7 +77,76 @@ Saat start, bot akan:
 - mengecek apakah kelima bot admin channel (kalau `CHANNEL_ID` diisi),
 - menampilkan jumlah emoji yang cocok dan limit reaction per post.
 
-### 6. Deploy gratis 100% di Render
+### 6. Deploy gratis di Oracle Cloud Always Free
+
+Oracle Always Free memberi VM yang selalu hidup tanpa biaya bulanan. Kartu dipakai untuk verifikasi akun. Jangan upgrade ke Pay As You Go dan jangan buat resource di luar kuota Always Free.
+
+**Risiko reclaim:** Oracle boleh menghentikan instance Always Free yang dianggap idle. Bot ini ringan, jadi CPU dan network-nya kecil. Instance bisa dihentikan Oracle setelah 7 hari idle. Kalau butuh jaminan lebih besar, pakai Render free + cron di bagian berikut.
+
+1. Buat akun Oracle Cloud. Pilih home region terdekat. Jangan upgrade akun.
+
+2. Buka **Compute > Instances > Create instance**:
+
+```text
+Image: Ubuntu 24.04
+Shape: VM.Standard.E2.1.Micro (AMD) atau VM.Standard.A1.Flex 1 OCPU / 6 GB (ARM)
+SSH key: tambahkan public key milikmu
+Public IPv4: yes
+```
+
+3. Masuk ke VM:
+
+```bash
+ssh ubuntu@<public-ip>
+```
+
+4. Install bot:
+
+```bash
+sudo apt update
+sudo apt install -y git python3-venv
+git clone https://github.com/arfinstar22/bot-reaction.git
+cd bot-reaction
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+cp .env.example .env
+nano .env
+```
+
+Isi `TG_TOKENS` dengan 5 token dan `CHANNEL_ID` dengan `@nama_channel`.
+
+5. Pasang service:
+
+```bash
+bash install-service.sh
+```
+
+Script membuat unit systemd sesuai user dan path VM, lalu enable dan start service.
+
+6. Lihat log:
+
+```bash
+journalctl -u reactionbot -f
+```
+
+Cari `login @bot...`, `admin ok`, dan `menunggu post baru`. Kalau `CHANNEL_ID` kosong, posting satu kali lalu salin `id=-100...` dari log ke `.env`, kemudian:
+
+```bash
+sudo systemctl restart reactionbot
+```
+
+Oracle hanya butuh port SSH 22 masuk. Bot memakai koneksi keluar untuk long polling; tidak perlu membuka port 80 atau 443.
+
+Untuk update kode:
+
+```bash
+cd ~/bot-reaction
+git pull
+.venv/bin/pip install -r requirements.txt
+sudo systemctl restart reactionbot
+```
+
+### 7. Alternatif gratis: Render + cron
 
 Render Free Web Service tidur setelah 15 menit tanpa inbound traffic. Bot ini sekarang membuka health endpoint di `/`, jadi service bisa dijaga tetap hidup dengan ping eksternal setiap 10 menit.
 
@@ -130,7 +199,7 @@ Kalau `TG_TOKENS` kosong atau jumlahnya bukan 5, proses berhenti dan log menampi
 
 **Catatan free 100%:** Render tidak meminta kartu untuk free web service. Ini kebijakan Render dan bisa berubah. Ping keepalive bukan garansi uptime; kalau Render restart atau cron telat, post selama downtime tidak diproses ulang.
 
-### 7. Alternatif: Fly.io
+### 8. Alternatif: Fly.io
 
 Fly.io **bukan free 100%**. Butuh kartu kredit setelah trial. Mesin terkecil `shared-cpu-1x` 256MB sekitar **US$2.19/bulan** di AS, **US$2.78/bulan** di Singapura. Fly membebaskan tagihan personal di bawah **US$5/bulan**, tapi kebijakan itu bisa berubah. Pakai jalur ini hanya kalau setuju dengan syarat kartu.
 
@@ -171,12 +240,12 @@ flyctl logs
 
 Fly menjalankan satu Machine 256MB tanpa port HTTP. Machine ini hidup terus, jadi bot tidak tidur seperti Render free.
 
-### 8. Alternatif gratis
+### 9. Alternatif lain
 
 - **Oracle Cloud Always Free**: VM ARM yang selalu hidup. Jalankan bot dengan systemd seperti di bawah. Butuh kartu untuk verifikasi dan setup SSH.
 - **Cloudflare Workers**: gratis dan selalu hidup, tapi bot harus diubah dari long polling ke webhook. Bukan pengganti langsung untuk kode ini.
 
-### 9. Jalankan permanen di VPS dengan systemd
+### 10. Jalankan permanen di VPS dengan systemd
 
 Edit `reactionbot.service` kalau user atau path berbeda. Lalu:
 
@@ -236,10 +305,11 @@ bot.py                program utama + health endpoint
 reactions.txt         daftar emoji
 test_bot.py           unit test logika filter, pemilihan emoji, dan health endpoint
 .env.example          contoh konfigurasi
+install-service.sh    installer systemd untuk Oracle/VPS
 render.yaml           blueprint Render free web service
 Dockerfile            image untuk Fly.io
 fly.toml              konfigurasi app Fly.io
 .dockerignore         file yang tidak masuk image
-reactionbot.service   unit systemd untuk VPS
+reactionbot.service   unit systemd manual untuk VPS
 requirements.txt      dependency Python
 ```
