@@ -1,6 +1,9 @@
+import http.client
+import os
 import unittest
+from unittest.mock import patch
 
-from bot import filter_pool, normalize_emoji, pick_reactions
+from bot import filter_pool, normalize_emoji, pick_reactions, start_health_server
 
 
 class ReactionBotTest(unittest.TestCase):
@@ -29,6 +32,22 @@ class ReactionBotTest(unittest.TestCase):
     def test_pick_never_more_than_pool(self):
         self.assertEqual(len(pick_reactions(["a", "b"], 5)), 2)
         self.assertEqual(pick_reactions(["a"], 0), [])
+
+    def test_health_server_returns_ok(self):
+        with patch.dict(os.environ, {"PORT": "0"}):
+            server = start_health_server()
+        self.assertIsNotNone(server)
+        try:
+            port = server.server_address[1]
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+            conn.request("GET", "/")
+            response = conn.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.read(), b"ok")
+            conn.close()
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 if __name__ == "__main__":

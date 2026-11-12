@@ -11,9 +11,11 @@ from __future__ import annotations
 import logging
 import os
 import random
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +68,43 @@ class ChatContext:
     emojis: list[str]
     limit: int
     fetched_at: float = field(default_factory=time.monotonic)
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        self._respond()
+
+    def do_HEAD(self) -> None:
+        self._respond()
+
+    def _respond(self) -> None:
+        body = b"ok"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        log.debug("health: " + format, *args)
+
+
+def start_health_server() -> ThreadingHTTPServer | None:
+    """Buka port HTTP untuk health check Render dan keepalive cron."""
+    raw_port = os.getenv("PORT", "").strip()
+    if not raw_port:
+        return None
+    try:
+        port = int(raw_port)
+    except ValueError:
+        raise SystemExit(f"PORT tidak valid: {raw_port!r}")
+
+    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
+    thread = threading.Thread(target=server.serve_forever, name="health", daemon=True)
+    thread.start()
+    log.info("health server di port %d", port)
+    return server
 
 
 def api_call(
@@ -410,6 +449,7 @@ def main() -> None:
         level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(message)s",
     )
+    start_health_server()
 
     cfg = load_config()
     log.info("memuat %d bot", len(cfg.bots))

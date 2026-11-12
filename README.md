@@ -12,6 +12,7 @@ Emoji diambil dari `reactions.txt`. Bot memilih dari emoji yang memang diizinkan
 - Kelima bot tetap harus admin channel. Bot tidak bisa menjadi subscriber biasa di channel.
 - Emoji difilter dengan `available_reactions` channel. Kalau channel hanya mengizinkan sebagian emoji, hanya bagian itu yang dipakai.
 - Post yang sudah ada sebelum bot start dilewati. Bot hanya bereaksi ke post baru selama bot berjalan. Post saat bot mati tidak diproses ulang.
+- Di Render, bot membuka port HTTP kecil untuk health check dan keepalive. Di Fly.io atau VPS, port tidak dibuka kalau `PORT` kosong.
 
 ## Setup
 
@@ -76,11 +77,62 @@ Saat start, bot akan:
 - mengecek apakah kelima bot admin channel (kalau `CHANNEL_ID` diisi),
 - menampilkan jumlah emoji yang cocok dan limit reaction per post.
 
-### 6. Deploy selalu aktif dengan Fly.io
+### 6. Deploy gratis 100% di Render
 
-Ini opsi yang disarankan. Bot tetap long polling, tidak butuh domain, HTTPS, atau webhook. `flyctl` sudah terpasang di mesin ini.
+Render Free Web Service tidur setelah 15 menit tanpa inbound traffic. Bot ini sekarang membuka health endpoint di `/`, jadi service bisa dijaga tetap hidup dengan ping eksternal setiap 10 menit.
 
-Biaya mesin terkecil `shared-cpu-1x` 256MB sekitar **US$2.19/bulan** di region AS, **US$2.78/bulan** di Singapura. Fly saat ini membebaskan tagihan personal organization di bawah **US$5/bulan**; cek syarat terbaru di dashboard. Butuh kartu kredit setelah masa trial.
+Batas free Render:
+
+- **750 instance hours/bulan**. Satu service yang selalu hidup memakai sekitar 730-744 jam, jadi masih muat.
+- Tidak perlu kartu kredit.
+- Cold start setelah restart sekitar 1 menit. Post saat bot mati tidak diproses ulang.
+- Render bisa menangguhkan free service yang membanjiri traffic. Bot ini hanya long polling, jadi traffic-nya kecil.
+
+1. Buka Render Dashboard, pilih **New > Blueprint**, lalu hubungkan repo `arfinstar22/bot-reaction`. Render membaca `render.yaml` dan membuat web service free di region Singapura.
+
+2. Saat diminta, isi environment variable:
+
+```text
+TG_TOKENS=111:AAA,222:BBB,333:CCC,444:DDD,555:EEE
+CHANNEL_ID=@nama_channel
+```
+
+Jangan taruh token di `render.yaml` atau repo.
+
+3. Tunggu deploy selesai. Salin URL service, bentuknya `https://<nama>.onrender.com`.
+
+4. Buat ping eksternal supaya service tidak tidur. Pakai [cron-job.org](https://cron-job.org) atau UptimeRobot:
+
+```text
+URL: https://<nama>.onrender.com/
+Method: GET
+Interval: setiap 10 menit
+```
+
+Cek manual dulu:
+
+```bash
+curl -i https://<nama>.onrender.com/
+```
+
+Harus balas `200 ok`. Kalau cron berjalan, Render melihat inbound traffic sebelum batas 15 menit dan service tetap hidup.
+
+5. Cek log Render. Cari baris:
+
+```text
+health server di port ...
+login @bot...
+admin ok
+menunggu post baru
+```
+
+Kalau `TG_TOKENS` kosong atau jumlahnya bukan 5, proses berhenti dan log menampilkan error. Perbaiki environment variable lalu deploy ulang.
+
+**Catatan free 100%:** Render tidak meminta kartu untuk free web service. Ini kebijakan Render dan bisa berubah. Ping keepalive bukan garansi uptime; kalau Render restart atau cron telat, post selama downtime tidak diproses ulang.
+
+### 7. Alternatif: Fly.io
+
+Fly.io **bukan free 100%**. Butuh kartu kredit setelah trial. Mesin terkecil `shared-cpu-1x` 256MB sekitar **US$2.19/bulan** di AS, **US$2.78/bulan** di Singapura. Fly membebaskan tagihan personal di bawah **US$5/bulan**, tapi kebijakan itu bisa berubah. Pakai jalur ini hanya kalau setuju dengan syarat kartu.
 
 1. Login:
 
@@ -117,26 +169,7 @@ flyctl status
 flyctl logs
 ```
 
-Fly akan menjalankan satu Machine 256MB tanpa port HTTP. Machine ini hidup terus, jadi bot tidak tidur seperti Render free.
-
-Kalau nanti mengubah kode atau `reactions.txt`, deploy ulang:
-
-```bash
-flyctl deploy
-```
-
-### 7. Kalau tetap mau Render
-
-Jangan pakai **Render Free Web Service**. Service itu tidur setelah 15 menit tanpa inbound traffic. Bot ini tidak punya HTTP server, jadi tidak akan membangunkan dirinya sendiri.
-
-Yang benar di Render: **Background Worker** dengan plan berbayar, mulai **US$7/bulan**. Background worker Render tidak punya tipe gratis. Buat `New > Background Worker`, hubungkan repo Git, lalu:
-
-```text
-Build Command: pip install -r requirements.txt
-Start Command: python bot.py
-```
-
-Tambahkan environment variable `TG_TOKENS` dan `CHANNEL_ID`. Render worker tidak butuh port HTTP. Dockerfile juga bisa dipakai kalau memilih runtime Docker.
+Fly menjalankan satu Machine 256MB tanpa port HTTP. Machine ini hidup terus, jadi bot tidak tidur seperti Render free.
 
 ### 8. Alternatif gratis
 
@@ -186,6 +219,9 @@ Cek **Maximum Number of Reactions** di channel. Set minimal 5.
 **Bot tidak menerima post**
 Pastikan Bot 1 admin channel. `channel_post` hanya dikirim ke admin.
 
+**Render balas `502` atau service tidur**
+Ping cron tidak berjalan atau URL salah. Cek job cron, lalu buka URL health secara manual. Service free butuh inbound traffic sebelum 15 menit.
+
 **`MESSAGE_ID_INVALID`**
 Post sudah dihapus atau itu service message yang tidak bisa direaction. Error ini aman diabaikan.
 
@@ -196,11 +232,12 @@ Post sudah dihapus atau itu service message yang tidak bisa direaction. Error in
 ## File
 
 ```text
-bot.py                program utama
+bot.py                program utama + health endpoint
 reactions.txt         daftar emoji
-test_bot.py           unit test logika filter dan pemilihan emoji
+test_bot.py           unit test logika filter, pemilihan emoji, dan health endpoint
 .env.example          contoh konfigurasi
-Dockerfile            image untuk Fly.io / Render
+render.yaml           blueprint Render free web service
+Dockerfile            image untuk Fly.io
 fly.toml              konfigurasi app Fly.io
 .dockerignore         file yang tidak masuk image
 reactionbot.service   unit systemd untuk VPS
