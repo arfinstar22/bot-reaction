@@ -1,0 +1,17 @@
+[Unit]
+Description=Telegram Channel Random Reaction Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=darfinstar
+WorkingDirectory=/home/darfinstar/projectReactionBot
+EnvironmentFile=/home/darfinstar/projectReactionBot/.env
+ExecStart=/home/darfinstar/projectReactionBot/.venv/bin/python /home/darfinstar/projectReactionBot/bot.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

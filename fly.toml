@@ -1,0 +1,14 @@
+# Ganti app name dengan nama unik milikmu. Nama app harus unik global di Fly.io.
+app = "reactionbot-darfinstar"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PYTHONUNBUFFERED = "1"
+  LOG_LEVEL = "INFO"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
