@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Auto-reaction bot untuk satu channel Telegram.
 
-Lima bot memasang satu reaction pada setiap post rich article baru. Hanya bot
-pertama yang menerima update lewat getUpdates; kelima token dipakai untuk
+Setiap bot memasang satu reaction pada setiap post rich article baru. Jumlah
+bot mengikuti isi TG_TOKENS, dibatasi max_reaction_count channel. Hanya bot
+pertama yang menerima update lewat getUpdates; semua token dipakai untuk
 memanggil setMessageReaction.
 """
 
@@ -25,7 +26,6 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent
 API_URL = "https://api.telegram.org/bot{token}/{method}"
 DEFAULT_REACTIONS_FILE = BASE_DIR / "reactions.txt"
-REACTION_COUNT = 5
 POLL_TIMEOUT = 30
 REQUEST_TIMEOUT = 15
 CONTEXT_TTL = 3600
@@ -61,6 +61,7 @@ class Config:
     bots: list[Bot]
     channel_id: str | None
     reactions_file: Path
+    reaction_count: int
 
 
 @dataclass
@@ -164,13 +165,14 @@ def load_config() -> Config:
 
     raw_tokens = os.getenv("TG_TOKENS", "")
     tokens = [token.strip() for token in raw_tokens.split(",") if token.strip()]
-    if len(tokens) != REACTION_COUNT:
+    if not tokens:
         raise SystemExit(
-            f"TG_TOKENS harus berisi {REACTION_COUNT} token bot, dipisah koma. "
-            f"Sekarang: {len(tokens)}."
+            "TG_TOKENS kosong. Isi minimal satu token bot dari @BotFather, dipisah koma."
         )
     if len(set(tokens)) != len(tokens):
-        raise SystemExit("TG_TOKENS berisi token duplikat. Pakai 5 bot berbeda.")
+        raise SystemExit(
+            f"TG_TOKENS berisi token duplikat. Pakai {len(tokens)} token bot berbeda."
+        )
 
     channel_id = os.getenv("CHANNEL_ID", "").strip() or None
     reactions_file = Path(
@@ -183,6 +185,7 @@ def load_config() -> Config:
         bots=[Bot(token=token) for token in tokens],
         channel_id=channel_id,
         reactions_file=reactions_file,
+        reaction_count=len(tokens),
     )
 
 
@@ -195,7 +198,9 @@ def authenticate(bots: list[Bot]) -> None:
 
     ids = [bot.id for bot in bots]
     if len(set(ids)) != len(ids):
-        raise SystemExit("Ada token bot yang sama. Pakai 5 bot berbeda.")
+        raise SystemExit(
+            f"Ada token bot yang sama. Pakai {len(bots)} token bot berbeda."
+        )
 
 
 def delete_webhook(token: str) -> None:
@@ -241,6 +246,19 @@ def check_channel(cfg: Config) -> None:
     else:
         log.info("reaction channel: %d tipe dipilih", len(available))
     log.info("max reaction types: %s", chat.get("max_reaction_count"))
+
+    try:
+        channel_max = int(chat.get("max_reaction_count") or cfg.reaction_count)
+    except (TypeError, ValueError):
+        channel_max = cfg.reaction_count
+    if len(cfg.bots) > channel_max:
+        log.warning(
+            "%d bot terdaftar, tapi channel hanya izinkan %d reaction/post. "
+            "Bot ke-%d dan seterusnya tidak dipakai.",
+            len(cfg.bots),
+            channel_max,
+            channel_max + 1,
+        )
 
     missing: list[str] = []
     for bot in cfg.bots:
@@ -306,17 +324,18 @@ def load_chat_context(
     token: str,
     chat_id: int | str,
     pool: list[str],
+    reaction_count: int,
 ) -> ChatContext:
     chat = api_call(token, "getChat", {"chat_id": chat_id})
 
-    max_count = chat.get("max_reaction_count", REACTION_COUNT)
+    max_count = chat.get("max_reaction_count", reaction_count)
     try:
         max_count = int(max_count)
     except (TypeError, ValueError):
-        max_count = REACTION_COUNT
+        max_count = reaction_count
 
     emojis = filter_pool(pool, chat.get("available_reactions"))
-    limit = max(0, min(REACTION_COUNT, max_count, len(emojis)))
+    limit = max(0, min(reaction_count, max_count, len(emojis)))
     log.info(
         "channel %s: %d emoji cocok, limit %d reaction/post",
         chat_id,
@@ -336,7 +355,9 @@ def get_chat_context(
     if cached and time.monotonic() - cached.fetched_at < CONTEXT_TTL:
         return cached
 
-    context = load_chat_context(cfg.bots[0].token, chat_id, pool)
+    context = load_chat_context(
+        cfg.bots[0].token, chat_id, pool, cfg.reaction_count
+    )
     cache[chat_id] = context
     return context
 
@@ -391,7 +412,7 @@ def handle_post(
         return
 
     chosen = pick_reactions(context.emojis, context.limit)
-    if len(chosen) < REACTION_COUNT:
+    if len(chosen) < cfg.reaction_count:
         log.warning(
             "channel %s: hanya bisa pasang %d reaction (limit channel)",
             chat_id,

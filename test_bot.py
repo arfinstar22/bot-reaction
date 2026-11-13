@@ -13,6 +13,8 @@ from bot import (
     filter_pool,
     handle_post,
     is_article_post,
+    load_chat_context,
+    load_config,
     normalize_emoji,
     pick_reactions,
     start_health_server,
@@ -80,11 +82,12 @@ class ReactionBotTest(unittest.TestCase):
             )
         )
 
-    def _config(self):
+    def _config(self, count: int = 5):
         return Config(
-            bots=[Bot(token=f"token{i}") for i in range(5)],
+            bots=[Bot(token=f"token{i}") for i in range(count)],
             channel_id="-1001",
             reactions_file=Path("reactions.txt"),
+            reaction_count=count,
         )
 
     def test_numeric_channel_id_requires_minus_100_prefix(self):
@@ -120,6 +123,43 @@ class ReactionBotTest(unittest.TestCase):
             call.args[2]["reaction"][0]["emoji"] for call in api.call_args_list
         ]
         self.assertEqual(sorted(chosen), sorted(context.emojis))
+
+    def test_ten_tokens_accepted(self):
+        tokens = ",".join(f"{i}:token{i}" for i in range(1, 11))
+        with patch.dict(os.environ, {"TG_TOKENS": tokens}):
+            cfg = load_config()
+        self.assertEqual(len(cfg.bots), 10)
+        self.assertEqual(cfg.reaction_count, 10)
+
+    def test_duplicate_tokens_rejected(self):
+        with patch.dict(os.environ, {"TG_TOKENS": "1:aaa,1:aaa"}):
+            with self.assertRaises(SystemExit):
+                load_config()
+
+    def test_ten_bots_send_ten_reactions(self):
+        post = {
+            "chat": {"id": -1001},
+            "message_id": 9,
+            "rich_message": {"blocks": [{"type": "paragraph"}]},
+        }
+        emojis = list("😀😁😂🤣😃😄😅😆😉😊")
+        context = ChatContext(emojis=emojis, limit=10)
+        with patch("bot.get_chat_context", return_value=context), patch(
+            "bot.api_call"
+        ) as api:
+            handle_post(post, self._config(10), ["😀"], {}, set(), deque())
+        self.assertEqual(api.call_count, 10)
+        chosen = {
+            call.args[2]["reaction"][0]["emoji"] for call in api.call_args_list
+        }
+        self.assertEqual(chosen, set(emojis))
+
+    def test_channel_max_caps_reaction_count(self):
+        chat = {"max_reaction_count": 11, "available_reactions": None}
+        pool = list("😀😁😂🤣😃😄😅😆😉😊😋😎")
+        with patch("bot.api_call", return_value=chat):
+            context = load_chat_context("token", -1001, pool, 12)
+        self.assertEqual(context.limit, 11)
 
 
 if __name__ == "__main__":

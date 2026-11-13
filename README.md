@@ -1,6 +1,6 @@
 # Telegram Channel Random Reaction Bot
 
-Lima bot memasang **5 reaction acak yang berbeda** pada setiap post baru di satu channel Telegram.
+Beberapa bot memasang **satu reaction acak per bot** pada setiap post baru di satu channel Telegram. Jumlah bot mengikuti jumlah token di `TG_TOKENS`.
 
 Emoji diambil dari `reactions.txt`. Bot memilih dari emoji yang memang diizinkan di channel, jadi reaction tidak ditolak karena setting channel.
 
@@ -9,19 +9,29 @@ Emoji diambil dari `reactions.txt`. Bot memilih dari emoji yang memang diizinkan
 ## Cara kerja
 
 - Bot 1 menjadi **controller**: polling `getUpdates` dengan `allowed_updates=["channel_post"]`.
-- Bot 1 sampai Bot 5 masing-masing memanggil `setMessageReaction` dengan token sendiri.
-- Bot 2 sampai Bot 5 tidak perlu polling atau webhook.
-- Kelima bot tetap harus admin channel. Bot tidak bisa menjadi subscriber biasa di channel.
+- Setiap bot memanggil `setMessageReaction` dengan token sendiri, satu reaction per post.
+- Hanya bot 1 yang polling. Bot lain tidak perlu polling atau webhook.
+- Semua bot harus admin channel. Bot tidak bisa menjadi subscriber biasa di channel.
 - Emoji difilter dengan `available_reactions` channel. Kalau channel hanya mengizinkan sebagian emoji, hanya bagian itu yang dipakai.
+- Jumlah reaction dibatasi `max_reaction_count` channel. Kalau bot lebih banyak dari limit, bot berlebih tidak dipakai.
 - Bot hanya bereaksi pada post **rich article** dari projectTumbnail, yaitu post yang punya field `rich_message`. Stiker, teks biasa, foto, video, album, dan service message dilewati.
 - Post yang sudah ada sebelum bot start dilewati. Bot hanya bereaksi ke post baru selama bot berjalan. Post saat bot mati tidak diproses ulang.
 - Di Render, bot membuka port HTTP kecil untuk health check dan keepalive. Di Fly.io atau VPS, port tidak dibuka kalau `PORT` kosong.
 
 ## Setup
 
-### 1. Buat 5 bot
+### 1. Buat bot
 
-Buka [@BotFather](https://t.me/BotFather), jalankan `/newbot` lima kali. Simpan lima token. Kelima bot harus berbeda; token duplikat ditolak saat start.
+Buka [@BotFather](https://t.me/BotFather), jalankan `/newbot` untuk setiap bot. Simpan semua token. Token harus berbeda; token duplikat ditolak saat start.
+
+Jumlah bot bebas, tapi berguna maksimal sebanyak `max_reaction_count` channel. Channel dengan limit 11 hanya bisa menampung 11 reaction, jadi bot ke-12 dan seterusnya tidak dipakai.
+
+**Menambah bot nanti** tidak perlu ubah kode:
+
+1. Buat bot baru lewat @BotFather.
+2. Tambahkan bot itu sebagai admin channel.
+3. Tambahkan tokennya ke `TG_TOKENS`, tetap dipisah koma.
+4. Simpan env dan redeploy. Jumlah reaction otomatis mengikuti jumlah token.
 
 ### 2. Isi konfigurasi
 
@@ -31,7 +41,7 @@ cp .env.example .env
 nano .env
 ```
 
-Isi `TG_TOKENS` dengan lima token, dipisah koma:
+Isi `TG_TOKENS` dengan semua token, dipisah koma:
 
 ```dotenv
 TG_TOKENS=111:AAA,222:BBB,333:CCC,444:DDD,555:EEE
@@ -44,7 +54,7 @@ CHANNEL_ID=@nama_channel
 - Angka polos seperti `3955448047` bukan ID channel. Telegram memakai `-1003955448047`.
 - Kalau `CHANNEL_ID` kosong, bot memproses channel apa pun yang mengirim `channel_post`. Isi `CHANNEL_ID` kalau bot dipasang di lebih dari satu channel.
 
-### 3. Tambahkan kelima bot sebagai admin
+### 3. Tambahkan semua bot sebagai admin
 
 Buka channel:
 
@@ -52,7 +62,7 @@ Buka channel:
 Channel > Administrators > Add Admin
 ```
 
-Tambahkan kelima bot. Permission boleh dikosongkan. Yang penting statusnya admin, bukan member biasa.
+Tambahkan semua bot. Permission boleh dikosongkan. Yang penting statusnya admin, bukan member biasa.
 
 ### 4. Atur reaction channel
 
@@ -63,8 +73,8 @@ Channel > Reactions
 ```
 
 - Pilih **All reactions**, atau **Selected reactions** yang memuat emoji dari `reactions.txt`.
-- Set **Maximum Number of Reactions** minimal **5**. Lebih aman **10**, supaya reaction subscriber tidak berebut slot dengan bot.
-- Kalau limit di bawah 5, bot hanya bisa memasang sebanyak limit tersebut.
+- Set **Maximum Number of Reactions** sesuai jumlah bot. Contoh 10 bot, set minimal **10**. Lebih aman **11**, supaya reaction subscriber tidak berebut slot dengan bot.
+- Kalau limit di bawah jumlah bot, bot hanya bisa memasang sebanyak limit tersebut.
 
 ### 5. Install dan jalankan
 
@@ -77,9 +87,9 @@ python3 -m venv .venv
 
 Saat start, bot akan:
 
-- login kelima token,
+- login semua token,
 - menghapus webhook bot controller,
-- mengecek apakah kelima bot admin channel (kalau `CHANNEL_ID` diisi),
+- mengecek apakah semua bot admin channel (kalau `CHANNEL_ID` diisi),
 - menampilkan jumlah emoji yang cocok dan limit reaction per post.
 
 ### 6. Deploy gratis di Oracle Cloud Always Free
@@ -118,7 +128,7 @@ cp .env.example .env
 nano .env
 ```
 
-Isi `TG_TOKENS` dengan 5 token dan `CHANNEL_ID` dengan `@nama_channel`.
+Isi `TG_TOKENS` dengan semua token dan `CHANNEL_ID` dengan `@nama_channel`.
 
 5. Pasang service:
 
@@ -200,7 +210,7 @@ admin ok
 menunggu post baru
 ```
 
-Kalau `TG_TOKENS` kosong atau jumlahnya bukan 5, proses berhenti dan log menampilkan error. Perbaiki environment variable lalu deploy ulang.
+Kalau `TG_TOKENS` kosong atau berisi token duplikat, proses berhenti dan log menampilkan error. Perbaiki environment variable lalu deploy ulang.
 
 **Catatan free 100%:** Render tidak meminta kartu untuk free web service. Ini kebijakan Render dan bisa berubah. Ping keepalive bukan garansi uptime; kalau Render restart atau cron telat, post selama downtime tidak diproses ulang.
 
@@ -282,7 +292,7 @@ Ada proses lain yang polling bot controller, atau webhook masih aktif. Hentikan 
 Token salah atau sudah di-revoke. Buat token baru lewat BotFather.
 
 **`400 Bad Request: chat not found`**
-`CHANNEL_ID` salah. Channel numerik wajib memakai prefix `-100`, contoh `-1003955448047`, bukan `3955448047`. Pastikan juga kelima bot sudah admin channel.
+`CHANNEL_ID` salah. Channel numerik wajib memakai prefix `-100`, contoh `-1003955448047`, bukan `3955448047`. Pastikan juga semua bot sudah admin channel.
 
 **`CHAT_ADMIN_REQUIRED` atau `not enough rights`**
 Bot belum admin channel. Tambahkan lewat `Channel > Administrators`.
