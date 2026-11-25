@@ -9,6 +9,7 @@ from bot import (
     Bot,
     ChatContext,
     Config,
+    TelegramError,
     check_channel,
     filter_pool,
     handle_post,
@@ -44,9 +45,18 @@ class ReactionBotTest(unittest.TestCase):
         self.assertEqual(len(picked), 5)
         self.assertEqual(len(set(picked)), 5)
 
-    def test_pick_never_more_than_pool(self):
-        self.assertEqual(len(pick_reactions(["a", "b"], 5)), 2)
+    def test_pick_repeats_when_count_exceeds_distinct_pool(self):
+        picked = pick_reactions(["a", "b"], 5)
+        self.assertEqual(len(picked), 5)
+        self.assertTrue(set(picked).issubset({"a", "b"}))
         self.assertEqual(pick_reactions(["a"], 0), [])
+
+    def test_pick_respects_max_distinct_for_twenty_bots(self):
+        pool = [chr(0x1F600 + i) for i in range(30)]
+        picked = pick_reactions(pool, 20, max_distinct=10)
+        self.assertEqual(len(picked), 20)
+        self.assertLessEqual(len(set(picked)), 10)
+        self.assertTrue(set(picked).issubset(set(pool)))
 
     def test_health_server_returns_ok(self):
         with patch.dict(os.environ, {"PORT": "0"}):
@@ -136,6 +146,23 @@ class ReactionBotTest(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 load_config()
 
+    def test_twenty_tokens_and_reserve_slots_loaded(self):
+        tokens = ",".join(f"{i}:token{i}" for i in range(1, 21))
+        with patch.dict(
+            os.environ, {"TG_TOKENS": tokens, "RESERVE_SLOTS": "0"}, clear=False
+        ):
+            cfg = load_config()
+        self.assertEqual(len(cfg.bots), 20)
+        self.assertEqual(cfg.reaction_count, 20)
+        self.assertEqual(cfg.reserve_slots, 0)
+
+    def test_invalid_reserve_slots_rejected(self):
+        with patch.dict(
+            os.environ, {"TG_TOKENS": "1:aaa", "RESERVE_SLOTS": "abc"}, clear=False
+        ):
+            with self.assertRaises(SystemExit):
+                load_config()
+
     def test_ten_bots_send_ten_reactions(self):
         post = {
             "chat": {"id": -1001},
@@ -154,12 +181,54 @@ class ReactionBotTest(unittest.TestCase):
         }
         self.assertEqual(chosen, set(emojis))
 
-    def test_channel_max_caps_reaction_count(self):
+    def test_channel_max_reserves_slot_by_default(self):
         chat = {"max_reaction_count": 11, "available_reactions": None}
         pool = list("😀😁😂🤣😃😄😅😆😉😊😋😎")
         with patch("bot.api_call", return_value=chat):
-            context = load_chat_context("token", -1001, pool, 12)
-        self.assertEqual(context.limit, 11)
+            reserved = load_chat_context("token", -1001, pool, 20)
+            unreserved = load_chat_context("token", -1001, pool, 20, reserve_slots=0)
+        self.assertEqual(reserved.limit, 10)
+        self.assertEqual(unreserved.limit, 11)
+
+    def test_twenty_bots_all_react_within_ten_distinct_types(self):
+        post = {
+            "chat": {"id": -1001},
+            "message_id": 10,
+            "rich_message": {"blocks": [{"type": "paragraph"}]},
+        }
+        emojis = list("😀😁😂🤣😃😄😅😆😉😊😋😎😍😘")
+        context = ChatContext(emojis=emojis, limit=10)
+        with patch("bot.get_chat_context", return_value=context), patch(
+            "bot.api_call"
+        ) as api:
+            handle_post(post, self._config(20), emojis, {}, set(), deque())
+        self.assertEqual(api.call_count, 20)
+        chosen = [call.args[2]["reaction"][0]["emoji"] for call in api.call_args_list]
+        self.assertEqual(len(chosen), 20)
+        self.assertLessEqual(len(set(chosen)), 10)
+
+    def test_reactions_too_many_retries_with_existing_emoji(self):
+        post = {
+            "chat": {"id": -1001},
+            "message_id": 11,
+            "rich_message": {"blocks": [{"type": "paragraph"}]},
+        }
+        context = ChatContext(emojis=["🔥", "👍"], limit=2)
+        calls = []
+
+        def fake_api(token, method, payload, **kwargs):
+            calls.append((token, payload["reaction"][0]["emoji"]))
+            if len(calls) == 2:
+                raise TelegramError(method, 400, "Bad Request: REACTIONS_TOO_MANY")
+            return True
+
+        with patch("bot.get_chat_context", return_value=context), patch(
+            "bot.api_call", side_effect=fake_api
+        ):
+            handle_post(post, self._config(2), ["🔥", "👍"], {}, set(), deque())
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[0][1], calls[2][1])
 
 
 if __name__ == "__main__":

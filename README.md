@@ -13,7 +13,7 @@ Emoji diambil dari `reactions.txt`. Bot memilih dari emoji yang memang diizinkan
 - Hanya bot 1 yang polling. Bot lain tidak perlu polling atau webhook.
 - Semua bot harus admin channel. Bot tidak bisa menjadi subscriber biasa di channel.
 - Emoji difilter dengan `available_reactions` channel. Kalau channel hanya mengizinkan sebagian emoji, hanya bagian itu yang dipakai.
-- Jumlah reaction dibatasi `max_reaction_count` channel. Kalau bot lebih banyak dari limit, bot berlebih tidak dipakai.
+- Jumlah **jenis emoji unik** dibatasi `max_reaction_count` channel (secara default disisakan 1 slot lewat `RESERVE_SLOTS=1`, jadi dari limit 11 dipakai maksimal 10 jenis agar 1 bot dari `projectTumbnail` tidak bentrok). Kalau jumlah bot lebih banyak dari batas jenis itu, semua bot tetap ikut bereaksi dengan menumpuk emoji dari jenis yang terpilih.
 - Bot hanya bereaksi pada post **rich article** dari projectTumbnail, yaitu post yang punya field `rich_message`. Stiker, teks biasa, foto, video, album, dan service message dilewati.
 - Post yang sudah ada sebelum bot start dilewati. Bot hanya bereaksi ke post baru selama bot berjalan. Post saat bot mati tidak diproses ulang.
 - Di Render, bot membuka port HTTP kecil untuk health check dan keepalive. Di Fly.io atau VPS, port tidak dibuka kalau `PORT` kosong.
@@ -24,7 +24,7 @@ Emoji diambil dari `reactions.txt`. Bot memilih dari emoji yang memang diizinkan
 
 Buka [@BotFather](https://t.me/BotFather), jalankan `/newbot` untuk setiap bot. Simpan semua token. Token harus berbeda; token duplikat ditolak saat start.
 
-Jumlah bot bebas, tapi berguna maksimal sebanyak `max_reaction_count` channel. Channel dengan limit 11 hanya bisa menampung 11 reaction, jadi bot ke-12 dan seterusnya tidak dipakai.
+Jumlah bot bebas (batas admin channel Telegram 50 akun). Channel dengan limit 11 membatasi **11 jenis emoji unik** per post, bukan total bot, jadi 20 bot di repo ini + 1 bot di `projectTumbnail` bisa semuanya aktif dengan sebagian emoji bertumpuk (x2, x3, dst.). Set `RESERVE_SLOTS=0` di `.env` jika tidak perlu menyisakan 1 slot untuk bot lain.
 
 **Menambah bot nanti** tidak perlu ubah kode:
 
@@ -73,8 +73,8 @@ Channel > Reactions
 ```
 
 - Pilih **All reactions**, atau **Selected reactions** yang memuat emoji dari `reactions.txt`.
-- Set **Maximum Number of Reactions** sesuai jumlah bot. Contoh 10 bot, set minimal **10**. Lebih aman **11**, supaya reaction subscriber tidak berebut slot dengan bot.
-- Kalau limit di bawah jumlah bot, bot hanya bisa memasang sebanyak limit tersebut.
+- Set **Maximum Number of Reactions** ke **11** (batas maksimal channel Telegram). Secara default bot menyisakan 1 slot (`RESERVE_SLOTS=1`) sehingga maksimal 10 jenis dipakai oleh bot di repo ini dan 1 slot aman untuk bot `projectTumbnail` / subscriber.
+- Kalau limit di bawah jumlah bot, semua bot tetap bereaksi dengan menumpuk emoji pada jenis yang tersedia.
 
 ### 5. Install dan jalankan
 
@@ -275,7 +275,7 @@ journalctl -u reactionbot -f
 
 Edit `reactions.txt`, satu emoji per baris. Baris `#` adalah komentar. Restart bot setelah mengubah file.
 
-Bot memilih 5 emoji **berbeda** secara acak per post. Kalau daftar yang diizinkan channel kurang dari 5, bot memakai sebanyak yang tersedia.
+Bot memilih hingga `max_reaction_count - RESERVE_SLOTS` jenis emoji unik per post (default maksimal 10 jenis jika limit channel 11). Kalau jumlah bot lebih banyak dari batas jenis tersebut, tiap bot mengambil acak dari jenis yang sudah terpilih sehingga beberapa emoji muncul bertumpuk. Kalau daftar yang diizinkan channel lebih sedikit, bot memakai sebanyak yang tersedia.
 
 ## Test
 

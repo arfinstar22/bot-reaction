@@ -2,7 +2,8 @@
 """Auto-reaction bot untuk satu channel Telegram.
 
 Setiap bot memasang satu reaction pada setiap post rich article baru. Jumlah
-bot mengikuti isi TG_TOKENS, dibatasi max_reaction_count channel. Hanya bot
+reaction mengikuti isi TG_TOKENS, sedangkan jumlah jenis emoji unik dibatasi
+max_reaction_count channel (bisa menyisakan slot via RESERVE_SLOTS). Hanya bot
 pertama yang menerima update lewat getUpdates; semua token dipakai untuk
 memanggil setMessageReaction.
 """
@@ -62,6 +63,7 @@ class Config:
     channel_id: str | None
     reactions_file: Path
     reaction_count: int
+    reserve_slots: int = 1
 
 
 @dataclass
@@ -181,11 +183,18 @@ def load_config() -> Config:
     if not reactions_file.is_absolute():
         reactions_file = BASE_DIR / reactions_file
 
+    raw_reserve = os.getenv("RESERVE_SLOTS", "1").strip() or "1"
+    try:
+        reserve_slots = max(0, int(raw_reserve))
+    except ValueError:
+        raise SystemExit(f"RESERVE_SLOTS tidak valid: {raw_reserve!r}")
+
     return Config(
         bots=[Bot(token=token) for token in tokens],
         channel_id=channel_id,
         reactions_file=reactions_file,
         reaction_count=len(tokens),
+        reserve_slots=reserve_slots,
     )
 
 
@@ -247,17 +256,18 @@ def check_channel(cfg: Config) -> None:
         log.info("reaction channel: %d tipe dipilih", len(available))
     log.info("max reaction types: %s", chat.get("max_reaction_count"))
 
-    try:
-        channel_max = int(chat.get("max_reaction_count") or cfg.reaction_count)
-    except (TypeError, ValueError):
-        channel_max = cfg.reaction_count
-    if len(cfg.bots) > channel_max:
-        log.warning(
-            "%d bot terdaftar, tapi channel hanya izinkan %d reaction/post. "
-            "Bot ke-%d dan seterusnya tidak dipakai.",
+    channel_max = _parse_channel_max(chat, min(cfg.reaction_count, 11))
+    distinct_cap = _distinct_limit(channel_max, None, cfg.reserve_slots)
+    if channel_max <= 0:
+        log.warning("channel menonaktifkan reaction (max_reaction_count=0)")
+    elif len(cfg.bots) > distinct_cap:
+        log.info(
+            "%d bot terdaftar; maks %d jenis reaction/post (limit channel=%d, "
+            "reserve=%d, bot selebihnya menumpuk emoji yang sama)",
             len(cfg.bots),
+            distinct_cap,
             channel_max,
-            channel_max + 1,
+            cfg.reserve_slots,
         )
 
     missing: list[str] = []
@@ -314,10 +324,43 @@ def filter_pool(
     return result
 
 
-def pick_reactions(pool: list[str], count: int) -> list[str]:
+def _parse_channel_max(chat: dict[str, Any], default: int) -> int:
+    """Ambil max_reaction_count channel dari respons getChat dengan fallback aman."""
+    raw = chat.get("max_reaction_count")
+    if raw is None:
+        return default
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return default
+
+
+def _distinct_limit(
+    channel_max: int,
+    available_count: int | None,
+    reserve_slots: int,
+) -> int:
+    """Hitung batas jenis emoji unik untuk bot ini, sisakan slot untuk bot lain."""
+    if channel_max <= 0 or (available_count is not None and available_count <= 0):
+        return 0
+    cap = max(1, channel_max - reserve_slots) if channel_max > 1 else channel_max
+    return cap if available_count is None else min(cap, available_count)
+
+
+def pick_reactions(
+    pool: list[str],
+    count: int,
+    max_distinct: int | None = None,
+) -> list[str]:
     if count <= 0 or not pool:
         return []
-    return random.sample(pool, k=min(count, len(pool)))
+    distinct_cap = len(pool) if max_distinct is None else min(max_distinct, len(pool))
+    if distinct_cap <= 0:
+        return []
+    allowed = random.sample(pool, k=distinct_cap)
+    if count <= len(allowed):
+        return random.sample(allowed, k=count)
+    return random.choices(allowed, k=count)
 
 
 def load_chat_context(
@@ -325,22 +368,20 @@ def load_chat_context(
     chat_id: int | str,
     pool: list[str],
     reaction_count: int,
+    reserve_slots: int = 1,
 ) -> ChatContext:
     chat = api_call(token, "getChat", {"chat_id": chat_id})
 
-    max_count = chat.get("max_reaction_count", reaction_count)
-    try:
-        max_count = int(max_count)
-    except (TypeError, ValueError):
-        max_count = reaction_count
-
+    max_count = _parse_channel_max(chat, min(reaction_count, 11))
     emojis = filter_pool(pool, chat.get("available_reactions"))
-    limit = max(0, min(reaction_count, max_count, len(emojis)))
+    limit = _distinct_limit(max_count, len(emojis), reserve_slots)
     log.info(
-        "channel %s: %d emoji cocok, limit %d reaction/post",
+        "channel %s: %d emoji cocok, maks %d jenis reaction/post (channel=%d, reserve=%d)",
         chat_id,
         len(emojis),
         limit,
+        max_count,
+        reserve_slots,
     )
     return ChatContext(emojis=emojis, limit=limit)
 
@@ -356,10 +397,23 @@ def get_chat_context(
         return cached
 
     context = load_chat_context(
-        cfg.bots[0].token, chat_id, pool, cfg.reaction_count
+        cfg.bots[0].token, chat_id, pool, cfg.reaction_count, cfg.reserve_slots
     )
     cache[chat_id] = context
     return context
+
+
+def _set_reaction(token: str, chat_id: int | str, message_id: int, emoji: str) -> None:
+    """Pasang satu reaction emoji ke pesan channel."""
+    api_call(
+        token,
+        "setMessageReaction",
+        {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reaction": [{"type": "emoji", "emoji": emoji}],
+        },
+    )
 
 
 def initial_offset(token: str) -> int:
@@ -411,35 +465,33 @@ def handle_post(
         )
         return
 
-    chosen = pick_reactions(context.emojis, context.limit)
-    if len(chosen) < cfg.reaction_count:
-        log.warning(
-            "channel %s: hanya bisa pasang %d reaction (limit channel)",
-            chat_id,
-            len(chosen),
-        )
-
+    chosen = pick_reactions(context.emojis, len(cfg.bots), context.limit)
+    succeeded: list[str] = []
     for bot, emoji in zip(cfg.bots, chosen):
+        target = emoji
         try:
-            api_call(
-                bot.token,
-                "setMessageReaction",
-                {
-                    "chat_id": chat_id,
-                    "message_id": post["message_id"],
-                    "reaction": [{"type": "emoji", "emoji": emoji}],
-                },
-            )
+            _set_reaction(bot.token, chat_id, post["message_id"], target)
+            succeeded.append(target)
         except TelegramError as exc:
+            alternatives = [item for item in succeeded if item != target]
+            if "REACTIONS_TOO_MANY" in exc.description and alternatives:
+                target = random.choice(alternatives)
+                try:
+                    _set_reaction(bot.token, chat_id, post["message_id"], target)
+                    succeeded.append(target)
+                    continue
+                except TelegramError as retry_exc:
+                    exc = retry_exc
             log.error(
                 "%s gagal reaction %s di post %s: %s",
                 bot.label,
-                emoji,
+                target,
                 post.get("message_id"),
                 exc,
             )
 
-    log.info("post %s: %s", post.get("message_id"), " ".join(chosen))
+    if succeeded:
+        log.info("post %s: %s", post.get("message_id"), " ".join(succeeded))
 
 
 def poll(cfg: Config, pool: list[str]) -> None:
