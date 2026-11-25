@@ -1,4 +1,5 @@
 import http.client
+import json
 import os
 import unittest
 from collections import deque
@@ -10,7 +11,9 @@ from bot import (
     ChatContext,
     Config,
     TelegramError,
+    WebhookState,
     check_channel,
+    derive_webhook_secret,
     filter_pool,
     handle_post,
     is_article_post,
@@ -18,6 +21,7 @@ from bot import (
     load_config,
     normalize_emoji,
     pick_reactions,
+    resolve_webhook_base,
     start_health_server,
 )
 
@@ -229,6 +233,155 @@ class ReactionBotTest(unittest.TestCase):
 
         self.assertEqual(len(calls), 3)
         self.assertEqual(calls[0][1], calls[2][1])
+
+    def test_reaction_invalid_invalidates_cache_and_retries(self):
+        post = {
+            "chat": {"id": -1001},
+            "message_id": 12,
+            "rich_message": {"blocks": [{"type": "paragraph"}]},
+        }
+        context = ChatContext(emojis=["🔥", "👍"], limit=2)
+        cache = {-1001: context}
+        calls = []
+
+        def fake_api(token, method, payload, **kwargs):
+            calls.append((token, payload["reaction"][0]["emoji"]))
+            if len(calls) == 2:
+                raise TelegramError(method, 400, "Bad Request: REACTION_INVALID")
+            return True
+
+        with patch("bot.get_chat_context", return_value=context), patch(
+            "bot.api_call", side_effect=fake_api
+        ):
+            handle_post(post, self._config(2), ["🔥", "👍"], cache, set(), deque())
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[0][1], calls[2][1])
+        self.assertNotIn(-1001, cache)
+
+    def test_rate_limit_429_waits_and_retries(self):
+        post = {
+            "chat": {"id": -1001},
+            "message_id": 13,
+            "rich_message": {"blocks": [{"type": "paragraph"}]},
+        }
+        context = ChatContext(emojis=["🔥"], limit=1)
+        calls = []
+
+        def fake_api(token, method, payload, **kwargs):
+            calls.append(payload["reaction"][0]["emoji"])
+            if len(calls) == 1:
+                raise TelegramError(
+                    method, 429, "Too Many Requests: retry after 2", retry_after=2
+                )
+            return True
+
+        with patch("bot.get_chat_context", return_value=context), patch(
+            "bot.api_call", side_effect=fake_api
+        ), patch("bot.time.sleep") as sleep_mock:
+            handle_post(post, self._config(1), ["🔥"], {}, set(), deque())
+
+        self.assertEqual(len(calls), 2)
+        sleep_mock.assert_called_once_with(2)
+
+    def test_resolve_webhook_base_uses_render_url_with_port(self):
+        with patch.dict(
+            os.environ,
+            {
+                "PORT": "10000",
+                "RENDER_EXTERNAL_URL": "https://reactionbot.onrender.com/",
+                "WEBHOOK_URL": "",
+            },
+            clear=False,
+        ):
+            self.assertEqual(resolve_webhook_base(), "https://reactionbot.onrender.com")
+
+        with patch.dict(
+            os.environ,
+            {
+                "PORT": "10000",
+                "RENDER_EXTERNAL_URL": "https://reactionbot.onrender.com",
+                "WEBHOOK_URL": "polling",
+            },
+            clear=False,
+        ):
+            self.assertIsNone(resolve_webhook_base())
+
+        with patch.dict(
+            os.environ,
+            {"PORT": "", "RENDER_EXTERNAL_URL": "https://reactionbot.onrender.com", "WEBHOOK_URL": ""},
+            clear=False,
+        ):
+            self.assertIsNone(resolve_webhook_base())
+
+        with patch.dict(
+            os.environ,
+            {"PORT": "", "WEBHOOK_URL": "https://example.com"},
+            clear=False,
+        ):
+            with self.assertRaises(SystemExit):
+                resolve_webhook_base()
+
+    def test_webhook_endpoint_auth_dedup_and_ready(self):
+        secret = derive_webhook_secret("123:secret")
+        state = WebhookState(secret_token=secret)
+        state.ready.set()
+        with patch.dict(os.environ, {"PORT": "0"}):
+            server = start_health_server(state)
+        self.assertIsNotNone(server)
+        try:
+            port = server.server_address[1]
+            payload = json.dumps(
+                {
+                    "update_id": 77,
+                    "channel_post": {
+                        "message_id": 2967,
+                        "chat": {"id": -1001},
+                        "rich_message": {"blocks": [{"type": "paragraph"}]},
+                    },
+                }
+            ).encode("utf-8")
+
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+            conn.request("POST", "/webhook", body=payload, headers={"Content-Length": str(len(payload))})
+            self.assertEqual(conn.getresponse().status, 403)
+            conn.close()
+
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+            headers = {
+                "Content-Length": str(len(payload)),
+                "X-Telegram-Bot-Api-Secret-Token": secret,
+            }
+            conn.request("POST", "/other", body=payload, headers=headers)
+            self.assertEqual(conn.getresponse().status, 404)
+            conn.close()
+
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+            conn.request("POST", "/webhook", body=payload, headers=headers)
+            res1 = conn.getresponse()
+            self.assertEqual(res1.status, 200)
+            res1.read()
+            conn.close()
+
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+            conn.request("POST", "/webhook", body=payload, headers=headers)
+            res2 = conn.getresponse()
+            self.assertEqual(res2.status, 200)
+            res2.read()
+            conn.close()
+
+            self.assertEqual(state.post_queue.qsize(), 1)
+            self.assertEqual(state.post_queue.get()["message_id"], 2967)
+
+            state.ready.clear()
+            with patch.object(state.ready, "wait", return_value=False):
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+                conn.request("POST", "/webhook", body=payload, headers=headers)
+                self.assertEqual(conn.getresponse().status, 503)
+                conn.close()
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 if __name__ == "__main__":

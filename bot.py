@@ -4,14 +4,18 @@
 Setiap bot memasang satu reaction pada setiap post rich article baru. Jumlah
 reaction mengikuti isi TG_TOKENS, sedangkan jumlah jenis emoji unik dibatasi
 max_reaction_count channel (bisa menyisakan slot via RESERVE_SLOTS). Hanya bot
-pertama yang menerima update lewat getUpdates; semua token dipakai untuk
-memanggil setMessageReaction.
+pertama yang menerima update lewat webhook atau getUpdates; semua token dipakai
+untuk memanggil setMessageReaction.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import logging
 import os
+import queue
 import random
 import threading
 import time
@@ -31,17 +35,27 @@ POLL_TIMEOUT = 30
 REQUEST_TIMEOUT = 15
 CONTEXT_TTL = 3600
 MEDIA_GROUP_LIMIT = 1000
+UPDATE_ID_LIMIT = 1000
+MAX_WEBHOOK_BODY = 1024 * 1024
+WEBHOOK_PATH = "/webhook"
 
 log = logging.getLogger("reactionbot")
 session = requests.Session()
 
 
 class TelegramError(RuntimeError):
-    def __init__(self, method: str, code: int, description: str) -> None:
+    def __init__(
+        self,
+        method: str,
+        code: int,
+        description: str,
+        retry_after: int = 0,
+    ) -> None:
         super().__init__(f"{method}: {code} {description}")
         self.method = method
         self.code = code
         self.description = description
+        self.retry_after = retry_after
 
 
 @dataclass
@@ -73,17 +87,85 @@ class ChatContext:
     fetched_at: float = field(default_factory=time.monotonic)
 
 
+@dataclass
+class WebhookState:
+    secret_token: str
+    post_queue: queue.Queue[dict[str, Any]] = field(default_factory=queue.Queue)
+    ready: threading.Event = field(default_factory=threading.Event)
+    seen_lock: threading.Lock = field(default_factory=threading.Lock)
+    seen_updates: set[int] = field(default_factory=set)
+    update_order: deque[int] = field(default_factory=deque)
+
+    def accept_update(self, update: dict[str, Any]) -> bool:
+        """Catat update_id agar retry webhook tidak memicu reaction ganda."""
+        update_id = update.get("update_id")
+        if isinstance(update_id, int):
+            with self.seen_lock:
+                if update_id in self.seen_updates:
+                    return False
+                self.seen_updates.add(update_id)
+                self.update_order.append(update_id)
+                if len(self.update_order) > UPDATE_ID_LIMIT:
+                    self.seen_updates.discard(self.update_order.popleft())
+
+        post = update.get("channel_post")
+        if isinstance(post, dict):
+            self.post_queue.put(post)
+        return True
+
+
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
-        self._respond()
+        self._respond(200, b"ok", "text/plain")
 
     def do_HEAD(self) -> None:
-        self._respond()
+        self._respond(200, b"ok", "text/plain")
 
-    def _respond(self) -> None:
-        body = b"ok"
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
+    def do_POST(self) -> None:
+        state: WebhookState | None = getattr(self.server, "webhook_state", None)
+        path = self.path.split("?", 1)[0]
+        if state is None or path != WEBHOOK_PATH:
+            self._respond(404, b'{"ok":false}', "application/json")
+            return
+
+        provided = self.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if not hmac.compare_digest(provided, state.secret_token):
+            self._respond(403, b'{"ok":false}', "application/json")
+            return
+
+        if not state.ready.wait(timeout=10):
+            self._respond(503, b'{"ok":false,"error":"starting"}', "application/json")
+            return
+
+        raw_length = self.headers.get("Content-Length", "")
+        try:
+            length = int(raw_length)
+        except ValueError:
+            self._respond(400, b'{"ok":false}', "application/json")
+            return
+        if length < 0:
+            self._respond(400, b'{"ok":false}', "application/json")
+            return
+        if length > MAX_WEBHOOK_BODY:
+            self._respond(413, b'{"ok":false}', "application/json")
+            return
+
+        body = self.rfile.read(length)
+        try:
+            update = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._respond(400, b'{"ok":false}', "application/json")
+            return
+        if not isinstance(update, dict):
+            self._respond(400, b'{"ok":false}', "application/json")
+            return
+
+        state.accept_update(update)
+        self._respond(200, b'{"ok":true}', "application/json")
+
+    def _respond(self, status: int, body: bytes, content_type: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         if self.command != "HEAD":
@@ -93,8 +175,10 @@ class HealthHandler(BaseHTTPRequestHandler):
         log.debug("health: " + format, *args)
 
 
-def start_health_server() -> ThreadingHTTPServer | None:
-    """Buka port HTTP untuk health check Render dan keepalive cron."""
+def start_health_server(
+    webhook_state: WebhookState | None = None,
+) -> ThreadingHTTPServer | None:
+    """Buka port HTTP untuk health check Render, keepalive cron, dan webhook."""
     raw_port = os.getenv("PORT", "").strip()
     if not raw_port:
         return None
@@ -104,6 +188,7 @@ def start_health_server() -> ThreadingHTTPServer | None:
         raise SystemExit(f"PORT tidak valid: {raw_port!r}")
 
     server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
+    server.webhook_state = webhook_state  # type: ignore[attr-defined]
     thread = threading.Thread(target=server.serve_forever, name="health", daemon=True)
     thread.start()
     log.info("health server di port %d", port)
@@ -129,10 +214,17 @@ def api_call(
         raise TelegramError(method, response.status_code, "respons bukan JSON") from exc
 
     if not data.get("ok"):
+        params = data.get("parameters")
+        raw_retry = params.get("retry_after", 0) if isinstance(params, dict) else 0
+        try:
+            retry_after = max(0, int(raw_retry))
+        except (TypeError, ValueError):
+            retry_after = 0
         raise TelegramError(
             method,
             int(data.get("error_code", 0)),
             str(data.get("description", "unknown error")),
+            retry_after=retry_after,
         )
     return data.get("result")
 
@@ -210,6 +302,49 @@ def authenticate(bots: list[Bot]) -> None:
         raise SystemExit(
             f"Ada token bot yang sama. Pakai {len(bots)} token bot berbeda."
         )
+
+
+def resolve_webhook_base() -> str | None:
+    """Tentukan base URL webhook dari WEBHOOK_URL atau RENDER_EXTERNAL_URL."""
+    explicit = os.getenv("WEBHOOK_URL", "").strip()
+    if explicit.lower() in ("off", "false", "0", "polling"):
+        return None
+
+    has_port = bool(os.getenv("PORT", "").strip())
+    if explicit:
+        if not has_port:
+            raise SystemExit("WEBHOOK_URL butuh PORT terisi.")
+        if not explicit.startswith(("https://", "http://")):
+            raise SystemExit(f"WEBHOOK_URL tidak valid: {explicit!r}")
+        return explicit.rstrip("/")
+
+    if not has_port:
+        return None
+    render_url = os.getenv("RENDER_EXTERNAL_URL", "").strip()
+    if render_url.startswith(("https://", "http://")):
+        return render_url.rstrip("/")
+    return None
+
+
+def derive_webhook_secret(controller_token: str) -> str:
+    custom = os.getenv("WEBHOOK_SECRET", "").strip()
+    if custom:
+        return custom
+    return hashlib.sha256(f"reactionbot:{controller_token}".encode("utf-8")).hexdigest()[:32]
+
+
+def set_webhook(token: str, url: str, secret_token: str) -> None:
+    api_call(
+        token,
+        "setWebhook",
+        {
+            "url": url,
+            "secret_token": secret_token,
+            "allowed_updates": ["channel_post"],
+            "drop_pending_updates": False,
+        },
+    )
+    log.info("mode webhook aktif: %s", url)
 
 
 def delete_webhook(token: str) -> None:
@@ -423,6 +558,52 @@ def initial_offset(token: str) -> int:
     return int(updates[-1]["update_id"]) + 1
 
 
+def _react_with_fallback(
+    bot: Bot,
+    chat_id: int | str,
+    message_id: int,
+    emoji: str,
+    succeeded: list[str],
+    cache: dict[int | str, ChatContext],
+) -> str | None:
+    target = emoji
+    try:
+        _set_reaction(bot.token, chat_id, message_id, target)
+        return target
+    except TelegramError as exc:
+        if exc.code == 429 and 0 < exc.retry_after <= 10:
+            time.sleep(exc.retry_after)
+            try:
+                _set_reaction(bot.token, chat_id, message_id, target)
+                return target
+            except TelegramError as retry_exc:
+                exc = retry_exc
+
+        if "REACTION_INVALID" in exc.description:
+            cache.pop(chat_id, None)
+
+        alternatives = [item for item in succeeded if item != target]
+        if alternatives and (
+            "REACTIONS_TOO_MANY" in exc.description
+            or "REACTION_INVALID" in exc.description
+        ):
+            target = random.choice(alternatives)
+            try:
+                _set_reaction(bot.token, chat_id, message_id, target)
+                return target
+            except TelegramError as retry_exc:
+                exc = retry_exc
+
+        log.error(
+            "%s gagal reaction %s di post %s: %s",
+            bot.label,
+            target,
+            message_id,
+            exc,
+        )
+        return None
+
+
 def handle_post(
     post: dict[str, Any],
     cfg: Config,
@@ -468,30 +649,36 @@ def handle_post(
     chosen = pick_reactions(context.emojis, len(cfg.bots), context.limit)
     succeeded: list[str] = []
     for bot, emoji in zip(cfg.bots, chosen):
-        target = emoji
-        try:
-            _set_reaction(bot.token, chat_id, post["message_id"], target)
-            succeeded.append(target)
-        except TelegramError as exc:
-            alternatives = [item for item in succeeded if item != target]
-            if "REACTIONS_TOO_MANY" in exc.description and alternatives:
-                target = random.choice(alternatives)
-                try:
-                    _set_reaction(bot.token, chat_id, post["message_id"], target)
-                    succeeded.append(target)
-                    continue
-                except TelegramError as retry_exc:
-                    exc = retry_exc
-            log.error(
-                "%s gagal reaction %s di post %s: %s",
-                bot.label,
-                target,
-                post.get("message_id"),
-                exc,
-            )
+        placed = _react_with_fallback(
+            bot, chat_id, post["message_id"], emoji, succeeded, cache
+        )
+        if placed is not None:
+            succeeded.append(placed)
 
     if succeeded:
         log.info("post %s: %s", post.get("message_id"), " ".join(succeeded))
+
+
+def serve_webhook(cfg: Config, pool: list[str], state: WebhookState) -> None:
+    """Proses channel_post dari antrean webhook secara serial."""
+    cache: dict[int | str, ChatContext] = {}
+    seen_media_groups: set[str] = set()
+    media_group_order: deque[str] = deque()
+    log.info("webhook siap; menunggu post baru")
+
+    while True:
+        post = state.post_queue.get()
+        try:
+            handle_post(
+                post,
+                cfg,
+                pool,
+                cache,
+                seen_media_groups,
+                media_group_order,
+            )
+        except Exception:
+            log.exception("gagal memproses update webhook post %s", post.get("message_id"))
 
 
 def poll(cfg: Config, pool: list[str]) -> None:
@@ -544,16 +731,37 @@ def main() -> None:
         level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(message)s",
     )
-    start_health_server()
 
     cfg = load_config()
+    pool = load_reactions(cfg.reactions_file)
+    webhook_base = resolve_webhook_base()
+    webhook_state = (
+        WebhookState(secret_token=derive_webhook_secret(cfg.bots[0].token))
+        if webhook_base
+        else None
+    )
+    start_health_server(webhook_state)
+
     log.info("memuat %d bot", len(cfg.bots))
     authenticate(cfg.bots)
+    log.info("%d emoji tersedia di %s", len(pool), cfg.reactions_file)
+
+    if webhook_state and webhook_base:
+        set_webhook(
+            cfg.bots[0].token,
+            f"{webhook_base}{WEBHOOK_PATH}",
+            webhook_state.secret_token,
+        )
+        webhook_state.ready.set()
+        check_channel(cfg)
+        try:
+            serve_webhook(cfg, pool, webhook_state)
+        except KeyboardInterrupt:
+            log.info("berhenti")
+        return
+
     delete_webhook(cfg.bots[0].token)
     check_channel(cfg)
-
-    pool = load_reactions(cfg.reactions_file)
-    log.info("%d emoji tersedia di %s", len(pool), cfg.reactions_file)
 
     try:
         poll(cfg, pool)

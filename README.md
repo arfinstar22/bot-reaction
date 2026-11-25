@@ -8,9 +8,9 @@ Emoji diambil dari `reactions.txt`. Bot memilih dari emoji yang memang diizinkan
 
 ## Cara kerja
 
-- Bot 1 menjadi **controller**: polling `getUpdates` dengan `allowed_updates=["channel_post"]`.
+- Bot 1 menjadi **controller**: di Render otomatis memakai **webhook** (`RENDER_EXTERNAL_URL/webhook`) supaya Telegram langsung membangunkan service dan mengirim `channel_post` walau service sempat tidur; di VPS/lokal memakai polling `getUpdates` dengan `allowed_updates=["channel_post"]`.
 - Setiap bot memanggil `setMessageReaction` dengan token sendiri, satu reaction per post.
-- Hanya bot 1 yang polling. Bot lain tidak perlu polling atau webhook.
+- Hanya bot 1 yang menerima update (webhook/polling). Bot lain tidak perlu polling atau webhook.
 - Semua bot harus admin channel. Bot tidak bisa menjadi subscriber biasa di channel.
 - Emoji difilter dengan `available_reactions` channel. Kalau channel hanya mengizinkan sebagian emoji, hanya bagian itu yang dipakai.
 - Jumlah **jenis emoji unik** dibatasi `max_reaction_count` channel (secara default disisakan 1 slot lewat `RESERVE_SLOTS=1`, jadi dari limit 11 dipakai maksimal 10 jenis agar 1 bot dari `projectTumbnail` tidak bentrok). Kalau jumlah bot lebih banyak dari batas jenis itu, semua bot tetap ikut bereaksi dengan menumpuk emoji dari jenis yang terpilih.
@@ -161,16 +161,15 @@ git pull
 sudo systemctl restart reactionbot
 ```
 
-### 7. Alternatif gratis: Render + cron
+### 7. Alternatif gratis: Render (webhook otomatis)
 
-Render Free Web Service tidur setelah 15 menit tanpa inbound traffic. Bot ini sekarang membuka health endpoint di `/`, jadi service bisa dijaga tetap hidup dengan ping eksternal setiap 10 menit.
+Render Free Web Service tidur setelah 15 menit tanpa inbound traffic. Di Render, `RENDER_EXTERNAL_URL` terisi otomatis sehingga bot langsung memakai mode **webhook** (`/webhook`). Saat ada post baru di channel, Telegram langsung mengirim request ke `/webhook` untuk membangunkan service dan memproses reaction tanpa kehilangan post.
 
 Batas free Render:
 
-- **750 instance hours/bulan**. Satu service yang selalu hidup memakai sekitar 730-744 jam, jadi masih muat.
+- **750 instance hours/bulan** per workspace. Dengan mode webhook tanpa cron 24/7, service boleh tidur saat tidak ada post sehingga hemat kuota jam gratis (penting jika akun Render juga menjalankan bot lain seperti `projectTumbnail`).
 - Tidak perlu kartu kredit.
-- Cold start setelah restart sekitar 1 menit. Post saat bot mati tidak diproses ulang.
-- Render bisa menangguhkan free service yang membanjiri traffic. Bot ini hanya long polling, jadi traffic-nya kecil.
+- Cold start setelah tidur sekitar 15-60 detik; Telegram otomatis mengulang pengiriman webhook jika request pertama timeout saat container masih booting.
 
 1. Buka Render Dashboard, pilih **New > Blueprint**, lalu hubungkan repo `arfinstar22/bot-reaction`. Render membaca `render.yaml` dan membuat web service free di region Singapura.
 
@@ -185,13 +184,7 @@ Jangan taruh token di `render.yaml` atau repo.
 
 3. Tunggu deploy selesai. Salin URL service, bentuknya `https://<nama>.onrender.com`.
 
-4. Buat ping eksternal supaya service tidak tidur. Pakai [cron-job.org](https://cron-job.org) atau UptimeRobot:
-
-```text
-URL: https://<nama>.onrender.com/
-Method: GET
-Interval: setiap 10 menit
-```
+4. (Opsional) Kalau ingin respons instan tanpa cold start dan kuota 750 jam masih cukup, buat ping eksternal ke `https://<nama>.onrender.com/` tiap 10 menit lewat [cron-job.org](https://cron-job.org) atau UptimeRobot.
 
 Cek manual dulu:
 
@@ -199,20 +192,21 @@ Cek manual dulu:
 curl -i https://<nama>.onrender.com/
 ```
 
-Harus balas `200 ok`. Kalau cron berjalan, Render melihat inbound traffic sebelum batas 15 menit dan service tetap hidup.
+Harus balas `200 ok`.
 
 5. Cek log Render. Cari baris:
 
 ```text
 health server di port ...
 login @bot...
+mode webhook aktif: https://<nama>.onrender.com/webhook
 admin ok
-menunggu post baru
+webhook siap; menunggu post baru
 ```
 
 Kalau `TG_TOKENS` kosong atau berisi token duplikat, proses berhenti dan log menampilkan error. Perbaiki environment variable lalu deploy ulang.
 
-**Catatan free 100%:** Render tidak meminta kartu untuk free web service. Ini kebijakan Render dan bisa berubah. Ping keepalive bukan garansi uptime; kalau Render restart atau cron telat, post selama downtime tidak diproses ulang.
+**Catatan free 100%:** Render tidak meminta kartu untuk free web service. Ini kebijakan Render dan bisa berubah. Jika ingin memaksa mode polling di Render, set `WEBHOOK_URL=polling`.
 
 ### 8. Alternatif: Fly.io
 
